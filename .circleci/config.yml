@@ -1,15 +1,10 @@
 version: 2.1
 
-# ─────────────────────────────────────────
-# ORBS — pre-built CircleCI plugins
-# ─────────────────────────────────────────
 orbs:
   aws-cli: circleci/aws-cli@4.0
   sam: circleci/aws-sam-serverless@4.0
 
-# ─────────────────────────────────────────
-# EXECUTORS — the machine that runs your jobs
-# ─────────────────────────────────────────
+
 executors:
   python-executor:
     docker:
@@ -23,12 +18,9 @@ executors:
     environment:
       AWS_DEFAULT_REGION: us-east-1
 
-# ─────────────────────────────────────────
-# JOBS
-# ─────────────────────────────────────────
 jobs:
 
-  # ── Job 1: Test the Lambda code ──────────
+  
   test-lambda:
     executor: python-executor
     steps:
@@ -42,7 +34,7 @@ jobs:
             pip install pytest
             pytest tests/ -v || echo "No tests found, skipping"
 
-  # ── Job 2: Deploy SAM stack ───────────────
+ 
   deploy-sam:
     executor: python-executor
     steps:
@@ -74,7 +66,6 @@ jobs:
                 CustomDomainName=${CUSTOM_DOMAIN_NAME} \
                 CertificateArn=${CERTIFICATE_ARN}
 
-  # ── Job 3: Terraform plan (on PR open) ───
   terraform-plan:
     executor: terraform-executor
     steps:
@@ -109,7 +100,6 @@ jobs:
           paths:
             - tfplan
 
-  # ── Job 4: Terraform apply (on PR merge) ─
   terraform-apply:
     executor: terraform-executor
     steps:
@@ -134,13 +124,9 @@ jobs:
             cd environments/dev
             terraform apply -auto-approve tfplan
 
-# ─────────────────────────────────────────
-# WORKFLOWS — when to run which jobs
-# ─────────────────────────────────────────
+
 workflows:
 
-  # Workflow 1: runs on EVERY push to main
-  # Deploys the SAM stack automatically
   deploy-serverless:
     jobs:
       - test-lambda:
@@ -154,8 +140,6 @@ workflows:
             branches:
               only: main
 
-  # Workflow 2: runs when a Terraform PR branch is pushed
-  # Plans the Terraform changes for review
   terraform-pr-check:
     jobs:
       - terraform-plan:
@@ -163,8 +147,6 @@ workflows:
             branches:
               only: /provision\/.*/
 
-  # Workflow 3: runs when a Terraform PR is merged to main
-  # Actually creates the RDS instance
   terraform-deploy:
     jobs:
       - terraform-apply:
