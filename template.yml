@@ -1,0 +1,265 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless RDS Cluster Automation - API Gateway + SNS + SQS + Lambda
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 256
+    Runtime: python3.11
+    Environment:
+      Variables:
+        GITHUB_TOKEN_SECRET: !Ref GitHubTokenSecret
+        GITHUB_OWNER: !Ref GitHubOwner
+        GITHUB_REPO: !Ref GitHubTerraformRepo
+        GITHUB_BASE_BRANCH: main
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: GitHub username or org that owns the Terraform repo
+
+  GitHubTerraformRepo:
+    Type: String
+    Description: Name of the Terraform repo (repo 2)
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+
+  CustomDomainName:
+    Type: String
+    Description: Custom domain name for API Gateway (e.g. api.yourdomain.com)
+
+  CertificateArn:
+    Type: String
+    Description: ACM certificate ARN for the custom domain
+
+Resources:
+
+  RDSRequestTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: rds-provision-requests
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  RDSRequestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: rds-provision-queue
+      VisibilityTimeout: 120
+      MessageRetentionPeriod: 86400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt RDSRequestDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  RDSRequestDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: rds-provision-dlq
+      MessageRetentionPeriod: 1209600
+
+  RDSQueueSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref RDSRequestTopic
+      Protocol: sqs
+      Endpoint: !GetAtt RDSRequestQueue.Arn
+
+  RDSQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref RDSRequestQueue
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt RDSRequestQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref RDSRequestTopic
+
+  RDSProvisionerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rds-provisioner
+      CodeUri: src/lambda/
+      Handler: handler.lambda_handler
+      Description: Consumes SQS messages and creates GitHub PRs with Terraform code
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        SQSTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt RDSRequestQueue.Arn
+            BatchSize: 1
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: rds-provisioner-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref GitHubTokenSecret
+
+  GitHubTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: /rds-automation/github-token
+      Description: GitHub personal access token for creating PRs
+      SecretString: '{"token":"REPLACE_ME_AFTER_DEPLOY"}'
+
+  # ── API Gateway ────────────────────────────────────────────
+  RDSProvisionAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: rds-provision-api
+      StageName: !Ref Environment
+      Auth:
+        ApiKeyRequired: true          # Bonus: API key auth
+        UsagePlan:
+          CreateUsagePlan: PER_API
+          UsagePlanName: rds-api-usage-plan
+          Quota:
+            Limit: 100
+            Period: DAY
+          Throttle:
+            BurstLimit: 10
+            RateLimit: 5
+      AccessLogSetting:
+        DestinationArn: !GetAtt APIGatewayLogGroup.Arn
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          LoggingLevel: INFO
+          MetricsEnabled: true
+
+  # ── API Gateway Lambda (publish to SNS) ───────────────────
+  APIHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: rds-api-handler
+      InlineCode: |
+        import json, boto3, os
+        sns = boto3.client('sns')
+        def lambda_handler(event, context):
+            body = json.loads(event.get('body', '{}'))
+            required = ['db_name', 'engine', 'environment']
+            for field in required:
+                if field not in body:
+                    return {'statusCode': 400, 'body': json.dumps({'error': f'Missing field: {field}'})}
+            if body['engine'] not in ['mysql', 'postgres']:
+                return {'statusCode': 400, 'body': json.dumps({'error': 'engine must be mysql or postgres'})}
+            if body['environment'] not in ['dev', 'prod']:
+                return {'statusCode': 400, 'body': json.dumps({'error': 'environment must be dev or prod'})}
+            sns.publish(
+                TopicArn=os.environ['SNS_TOPIC_ARN'],
+                Message=json.dumps(body),
+                Subject='RDS Provision Request'
+            )
+            return {'statusCode': 202, 'body': json.dumps({'message': 'Request accepted', 'db_name': body['db_name']})}
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref RDSRequestTopic
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt RDSRequestTopic.TopicName
+      Events:
+        ProvisionRDS:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RDSProvisionAPI
+            Path: /provision
+            Method: POST
+
+  # ── Custom Domain ──────────────────────────────────────────
+  APICustomDomain:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      DomainName: !Ref CustomDomainName
+      CertificateArn: !Ref CertificateArn
+      EndpointConfiguration:
+        Types:
+          - EDGE
+
+  APIBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Properties:
+      DomainName: !Ref APICustomDomain
+      RestApiId: !Ref RDSProvisionAPI
+      Stage: !Ref Environment
+
+  # ── CloudWatch Log Groups ──────────────────────────────────
+  APIGatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/apigateway/rds-provision-api
+      RetentionInDays: 30
+
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rds-provisioner
+      RetentionInDays: 30
+
+  APIHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rds-api-handler
+      RetentionInDays: 30
+
+Outputs:
+  APIEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${RDSProvisionAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/provision"
+
+  CustomDomainEndpoint:
+    Description: Custom domain endpoint
+    Value: !Sub "https://${CustomDomainName}/provision"
+
+  SNSTopicArn:
+    Description: SNS Topic ARN
+    Value: !Ref RDSRequestTopic
+
+  SQSQueueUrl:
+    Description: SQS Queue URL
+    Value: !Ref RDSRequestQueue
+
+  DLQUrl:
+    Description: Dead Letter Queue URL
+    Value: !Ref RDSRequestDLQ
+```
+
+---
+
+### `src/lambda/requirements.txt`
+```
+requests==2.31.0
+boto3==1.34.0

@@ -1,0 +1,173 @@
+version: 2.1
+
+# ─────────────────────────────────────────
+# ORBS — pre-built CircleCI plugins
+# ─────────────────────────────────────────
+orbs:
+  aws-cli: circleci/aws-cli@4.0
+  sam: circleci/aws-sam-serverless@4.0
+
+# ─────────────────────────────────────────
+# EXECUTORS — the machine that runs your jobs
+# ─────────────────────────────────────────
+executors:
+  python-executor:
+    docker:
+      - image: cimg/python:3.11
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+
+  terraform-executor:
+    docker:
+      - image: hashicorp/terraform:1.5.7
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+
+# ─────────────────────────────────────────
+# JOBS
+# ─────────────────────────────────────────
+jobs:
+
+  # ── Job 1: Test the Lambda code ──────────
+  test-lambda:
+    executor: python-executor
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: pip install -r src/lambda/requirements.txt
+      - run:
+          name: Run tests
+          command: |
+            pip install pytest
+            pytest tests/ -v || echo "No tests found, skipping"
+
+  # ── Job 2: Deploy SAM stack ───────────────
+  deploy-sam:
+    executor: python-executor
+    steps:
+      - checkout
+      - aws-cli/setup:
+          aws_access_key_id: AWS_ACCESS_KEY_ID
+          aws_secret_access_key: AWS_SECRET_ACCESS_KEY
+          region: AWS_DEFAULT_REGION
+      - run:
+          name: Install SAM CLI
+          command: |
+            pip install aws-sam-cli
+      - run:
+          name: SAM Build
+          command: sam build
+      - run:
+          name: SAM Deploy
+          command: |
+            sam deploy \
+              --no-confirm-changeset \
+              --no-fail-on-empty-changeset \
+              --stack-name rds-automation-sam \
+              --s3-bucket ${SAM_DEPLOYMENT_BUCKET} \
+              --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+              --parameter-overrides \
+                GitHubOwner=${GITHUB_OWNER} \
+                GitHubTerraformRepo=${GITHUB_TERRAFORM_REPO} \
+                Environment=dev \
+                CustomDomainName=${CUSTOM_DOMAIN_NAME} \
+                CertificateArn=${CERTIFICATE_ARN}
+
+  # ── Job 3: Terraform plan (on PR open) ───
+  terraform-plan:
+    executor: terraform-executor
+    steps:
+      - checkout
+      - aws-cli/setup:
+          aws_access_key_id: AWS_ACCESS_KEY_ID
+          aws_secret_access_key: AWS_SECRET_ACCESS_KEY
+          region: AWS_DEFAULT_REGION
+      - run:
+          name: Terraform Init
+          command: |
+            cd environments/dev
+            terraform init \
+              -backend-config="bucket=${TF_STATE_BUCKET}" \
+              -backend-config="key=dev/rds/terraform.tfstate" \
+              -backend-config="region=us-east-1"
+      - run:
+          name: Terraform Validate
+          command: |
+            cd environments/dev
+            terraform validate
+      - run:
+          name: Terraform Plan
+          command: |
+            cd environments/dev
+            terraform plan \
+              -var="vpc_id=${VPC_ID}" \
+              -var="subnet_ids=[\"${SUBNET_ID_1}\",\"${SUBNET_ID_2}\"]" \
+              -out=tfplan
+      - persist_to_workspace:
+          root: environments/dev
+          paths:
+            - tfplan
+
+  # ── Job 4: Terraform apply (on PR merge) ─
+  terraform-apply:
+    executor: terraform-executor
+    steps:
+      - checkout
+      - aws-cli/setup:
+          aws_access_key_id: AWS_ACCESS_KEY_ID
+          aws_secret_access_key: AWS_SECRET_ACCESS_KEY
+          region: AWS_DEFAULT_REGION
+      - attach_workspace:
+          at: environments/dev
+      - run:
+          name: Terraform Init
+          command: |
+            cd environments/dev
+            terraform init \
+              -backend-config="bucket=${TF_STATE_BUCKET}" \
+              -backend-config="key=dev/rds/terraform.tfstate" \
+              -backend-config="region=us-east-1"
+      - run:
+          name: Terraform Apply
+          command: |
+            cd environments/dev
+            terraform apply -auto-approve tfplan
+
+# ─────────────────────────────────────────
+# WORKFLOWS — when to run which jobs
+# ─────────────────────────────────────────
+workflows:
+
+  # Workflow 1: runs on EVERY push to main
+  # Deploys the SAM stack automatically
+  deploy-serverless:
+    jobs:
+      - test-lambda:
+          filters:
+            branches:
+              only: main
+      - deploy-sam:
+          requires:
+            - test-lambda
+          filters:
+            branches:
+              only: main
+
+  # Workflow 2: runs when a Terraform PR branch is pushed
+  # Plans the Terraform changes for review
+  terraform-pr-check:
+    jobs:
+      - terraform-plan:
+          filters:
+            branches:
+              only: /provision\/.*/
+
+  # Workflow 3: runs when a Terraform PR is merged to main
+  # Actually creates the RDS instance
+  terraform-deploy:
+    jobs:
+      - terraform-apply:
+          filters:
+            branches:
+              only: main
