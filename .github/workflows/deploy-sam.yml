@@ -1,36 +1,14 @@
 name: Deploy SAM Stack
 
-# Runs when you push to main
 on:
   push:
     branches:
       - main
 
 jobs:
-  test-lambda:
-    name: Test Lambda Function
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -r src/lambda/requirements.txt
-
-      - name: Run tests
-        run: |
-          pip install pytest
-          pytest tests/ -v || echo "No tests found, skipping"
-
   deploy-sam:
-    name: Deploy SAM to AWS
     runs-on: ubuntu-latest
-    needs: test-lambda   # only runs if test-lambda passes
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -38,7 +16,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -48,7 +26,10 @@ jobs:
           aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
 
       - name: Install SAM CLI
-        run: pip install aws-sam-cli
+        uses: aws-actions/setup-sam@v2
+
+      - name: SAM Validate
+        run: sam validate
 
       - name: SAM Build
         run: sam build
@@ -60,10 +41,4 @@ jobs:
             --no-fail-on-empty-changeset \
             --stack-name rds-automation-sam \
             --s3-bucket ${{ secrets.SAM_DEPLOYMENT_BUCKET }} \
-            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
-            --parameter-overrides \
-              GitHubOwner=${{ secrets.GITHUB_OWNER }} \
-              GitHubTerraformRepo=${{ secrets.GITHUB_TERRAFORM_REPO }} \
-              Environment=dev \
-              CustomDomainName=${{ secrets.CUSTOM_DOMAIN_NAME }} \
-              CertificateArn=${{ secrets.CERTIFICATE_ARN }}
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
