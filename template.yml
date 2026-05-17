@@ -134,14 +134,14 @@ Resources:
       Description: GitHub personal access token for creating PRs
       SecretString: '{"token":"REPLACE_ME_AFTER_DEPLOY"}'
 
-  # ── API Gateway ────────────────────────────────────────────
+  
   RDSProvisionAPI:
     Type: AWS::Serverless::Api
     Properties:
       Name: rds-provision-api
       StageName: !Ref Environment
       Auth:
-        ApiKeyRequired: true          # Bonus: API key auth
+        ApiKeyRequired: true         
         UsagePlan:
           CreateUsagePlan: PER_API
           UsagePlanName: rds-api-usage-plan
@@ -159,7 +159,7 @@ Resources:
           LoggingLevel: INFO
           MetricsEnabled: true
 
-  # ── API Gateway Lambda (publish to SNS) ───────────────────
+ 
   APIHandlerFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -199,7 +199,7 @@ Resources:
             Path: /provision
             Method: POST
 
-  # ── Custom Domain ──────────────────────────────────────────
+  
   APICustomDomain:
     Type: AWS::ApiGateway::DomainName
     Properties:
@@ -216,7 +216,7 @@ Resources:
       RestApiId: !Ref RDSProvisionAPI
       Stage: !Ref Environment
 
-  # ── CloudWatch Log Groups ──────────────────────────────────
+  
   APIGatewayLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -255,11 +255,3 @@ Outputs:
   DLQUrl:
     Description: Dead Letter Queue URL
     Value: !Ref RDSRequestDLQ
-```
-
----
-
-### `src/lambda/requirements.txt`
-```
-requests==2.31.0
-boto3==1.34.0
