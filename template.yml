@@ -18,10 +18,12 @@ Parameters:
   GitHubOwner:
     Type: String
     Description: GitHub username or org that owns the Terraform repo
+    Default: ""
 
   GitHubTerraformRepo:
     Type: String
     Description: Name of the Terraform repo (repo 2)
+    Default: ""
 
   Environment:
     Type: String
@@ -31,10 +33,12 @@ Parameters:
   CustomDomainName:
     Type: String
     Description: Custom domain name for API Gateway (e.g. api.yourdomain.com)
+    Default: ""
 
   CertificateArn:
     Type: String
     Description: ACM certificate ARN for the custom domain
+    Default: ""
 
 Resources:
 
